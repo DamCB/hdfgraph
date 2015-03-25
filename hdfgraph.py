@@ -13,12 +13,15 @@ import os
 import numpy as np
 import pandas as pd
 
+import logging
+log = logging.getLogger(__name__)
+
+
 try:
     from graph_tool import Graph
 except ImportError:
-    print('''graph-tool is not available, you won't be able to load data as a graph
-          You can still read the tables though''')
-
+    log.warning('''graph-tool is not available, you won't be able to load
+                data as a graph. You can still read the tables though''')
 
 TYPES_WHITELIST = ['bool', 'uint8_t', 'double', 'float',
                    'int16_t', 'int32_t', 'int64_t',
@@ -33,7 +36,12 @@ TYPES_BLACKLIST = ['string', 'vector<bool>', 'vector<uint8_t>',
                    'vector<long double>', 'vector<string>',
                    'python::object', 'object']
 
-ALIASES = {'float64':'double', 'int8':'bool', 'int32':'int'}
+ALIASES = {'float64':'double',
+           'bool':'bool',
+           'int8':'bool',
+           'int32':'int',
+           'int64':'long',
+           'uint8':'bool'}
 
 
 
@@ -100,16 +108,15 @@ def graph_to_dataframes(graph, stamp=None):
                               for key, prop in graph.vertex_properties.items()
                               if prop.value_type() in TYPES_WHITELIST},
                              index=vertex_index)
-    valid = _get_valid_mask(graph)
-    graph.set_edge_filter(valid)
+    graph.set_edge_filter(None)
     edge_df = pd.DataFrame({key: np.array(prop.fa, dtype=prop.fa.dtype)
                             for key, prop in graph.edge_properties.items()
                             if prop.value_type() in TYPES_WHITELIST},
                            index=edge_index)
-    graph.set_edge_filter(None)
     return vertex_df, edge_df
 
-def frames_to_hdf(vertex_df, edge_df, fname, reset=False, vert_kwargs={}, edge_kwargs={}):
+def frames_to_hdf(vertex_df, edge_df, fname, reset=False,
+                  vert_kwargs={}, edge_kwargs={}):
     '''
     Records the two  DataFrame in the hdf file filename
     '''
@@ -288,26 +295,126 @@ def _get_valid_mask(graph):
     return valid
 
 
-
-
-def slice_data(vertices_df, edges_df, v_bounds={}):
+def slice_data(vertices_df, edge_df, v_bounds={}):
 
     for col, (v_min, v_max) in v_bounds.items():
         vertices_df = vertices_df[vertices_df[col] >= v_min]
         vertices_df = vertices_df[vertices_df[col] <= v_max]
     vertex_index = set(vertices_df.index.get_level_values('vertex_index'))
 
-    src_index = set(edges_df.index.get_level_values('source'))
-    trgt_index = set(edges_df.index.get_level_values('target'))
+    src_index = set(edge_df.index.get_level_values('source'))
+    trgt_index = set(edge_df.index.get_level_values('target'))
     srcs = src_index.intersection(vertex_index)
     trgts = trgt_index.intersection(vertex_index)
-    edges_df['keep'] = True
-    keep = edges_df.groupby(level='source', group_keys=True).apply(select_idx_, 'source', srcs,)
-    assert keep.shape[0] == edges_df.shape[0]
-    edges_df = edges_df[keep.values]
-    keep = edges_df.groupby(level='target', group_keys=True).apply(select_idx_, 'target', trgts)
-    edges_df = edges_df[keep.values]
-    return vertices_df, edges_df
+    edge_df['keep'] = True
+    keep = edge_df.groupby(level='source', group_keys=True).apply(select_idx_,
+                                                                   'source', srcs,)
+    assert keep.shape[0] == edge_df.shape[0]
+    edge_df = edge_df[keep.values]
+    keep = edge_df.groupby(level='target', group_keys=True).apply(select_idx_,
+                                                                   'target', trgts)
+    edge_df = edge_df[keep.values]
+    return vertices_df, edge_df
+
+def update_dframes(graph, vertex_df, edge_df, vcols=None, ecols=None):
+    if vcols is not None:
+        vitems = {col: graph.vertex_properties[col] for col in vcols}.items()
+    else:
+        vitems = graph.vertex_properties.items()
+    if ecols is not None:
+        eitems = {col: graph.edge_properties[col] for col in vcols}.items()
+    else:
+        eitems = graph.edge_properties.items()
+
+    for col, prop in vitems:
+        try:
+            vertex_df[col] = prop.fa
+        except KeyError:
+            log.info('Property {} not in vertex dataframe'.format(col))
+    for col, prop in eitems:
+        try:
+            edge_df[col] = prop.fa
+        except KeyError:
+            log.info('Property {} not in edge dataframe'.format(col))
+
+
+def complete_pmaps(graph, vertex_df, edge_df, vcols=None, ecols=None):
+    '''
+    Completes the vertex and edge (internalized) property maps
+    with the columns of the vertex_df and edge_df DataFrames.
+    Warning: this only initializes the properymaps, values are NOT set
+
+
+    '''
+    if vcols is None:
+        vdf_cols = set(vertex_df.columns)
+    else:
+        vdf_cols = set(vcols)
+    vp_cols = set(graph.vertex_properties.keys())
+    missing_vps = vdf_cols.difference(vp_cols)
+
+    for new in missing_vps:
+        try:
+            dtype = ALIASES[vertex_df.dtypes[new].name]
+            new_vp = graph.new_vertex_property(dtype)
+            graph.vertex_properties[new] = new_vp
+        except ValueError:
+            log.warning(
+                "Data type not supported for column {}, "
+                "it won't be passed as a vector property".format(new))
+
+
+    if ecols is None:
+        edf_cols = set(edge_df.columns)
+    else:
+        edf_cols = ecols
+    ep_cols = set(graph.edge_properties.keys())
+    missing_eps = edf_cols.difference(ep_cols)
+
+    for new in missing_eps:
+        try:
+            dtype = ALIASES[edge_df.dtypes[new].name]
+            new_vp = graph.new_edge_property(dtype)
+            graph.edge_properties[new] = new_vp
+        except ValueError:
+            log.warning(
+                "Data type not supported for column {}, "
+                "it won't be passed as a vector property".format(new))
+
+def update_pmaps(graph, vertex_df, edge_df, vcols=None, ecols=None):
+
+    if vcols is not None:
+        vitems = {col: graph.vertex_properties[col] for col in vcols}.items()
+    else:
+        vitems = graph.vertex_properties.items()
+    if ecols is not None:
+        eitems = {col: graph.edge_properties[col] for col in vcols}.items()
+    else:
+        eitems = graph.edge_properties.items()
+
+    for col, prop in vitems:
+        try:
+            prop.fa = vertex_df[col]
+        except KeyError:
+            log.info('Property {} not in vertex dataframe'.format(col))
+    for col, prop in eitems:
+        try:
+            prop.fa = edge_df[col]
+        except KeyError:
+            log.info('Property {} not in edge dataframe'.format(col))
+
+def _guess_dtype(col, df):
+
+    if 'float' in df.dtypes[col].name:
+        return 'float'
+    elif 'int' in df.dtypes[col].name:
+        if set(df[col].unique()).issubset({0, 1}) :
+            return 'bool'
+        else:
+            return 'long'
+    else:
+        raise ValueError(
+            'Unsuported data type {}'.format(df.dtypes[col].name))
 
 
 def select_idx_(df, idx_name, valids):
