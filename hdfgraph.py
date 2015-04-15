@@ -41,7 +41,8 @@ ALIASES = {'float64':'double',
            'int8':'bool',
            'int32':'int',
            'int64':'long',
-           'uint8':'bool'}
+           'uint8':'bool',
+           'uint16':'long'}
 
 
 
@@ -173,9 +174,14 @@ def graph_from_dataframes(vertex_df, edge_df):
     vertex_index = vertex_df.index.get_level_values(level='vertex_index')
     vertices = graph.add_vertex(n=vertex_index.shape[0])
     for col in vertex_df.columns:
-        dtype = ALIASES[vertex_df[col].dtype.name]
+        in_type = vertex_df[col].dtype.name
+        try:
+            dtype = ALIASES[in_type]
+        except KeyError:
+            log.info('Data type {} not supported'.format(in_type))
+            continue
         prop = graph.new_vertex_property(dtype)
-        prop.a = vertex_df[col]
+        prop.fa = vertex_df[col]
         graph.vertex_properties[col] = prop
 
     src = edge_df.index.names.index('source')
@@ -183,13 +189,21 @@ def graph_from_dataframes(vertex_df, edge_df):
     ### TODO: use the list edge creation
     for tup in edge_df.index:
         source, target = tup[src], tup[trgt]
-        edge = graph.add_edge(source, target)
-
+        try:
+            edge = graph.add_edge(source, target)
+        except ValueError:
+            log.info('Invalid vertex in (source: {}, target: {})'.format(source, target))
     for col in edge_df.columns:
-        dtype = ALIASES[edge_df[col].dtype.name]
+        in_type = edge_df[col].dtype.name
+        try:
+            dtype = ALIASES[in_type]
+        except KeyError:
+            log.info('Data type {} not supported'.format(in_type))
+            continue
         prop = graph.new_edge_property(dtype)
-        prop.a = edge_df[col]
+        prop.fa = edge_df[col]
         graph.edge_properties[col] = prop
+
     return graph
 
 def table_from_hdf(fname, table, stamp=None, **kwargs):
@@ -383,6 +397,7 @@ def complete_pmaps(graph, vertex_df, edge_df, vcols=None, ecols=None):
 
 def update_pmaps(graph, vertex_df, edge_df, vcols=None, ecols=None):
 
+
     if vcols is not None:
         vitems = {col: graph.vertex_properties[col] for col in vcols}.items()
     else:
@@ -392,14 +407,18 @@ def update_pmaps(graph, vertex_df, edge_df, vcols=None, ecols=None):
     else:
         eitems = graph.edge_properties.items()
 
+    v_idx = np.asarray(graph.vertex_index.copy().fa)
+    e_idx = np.asarray(graph.edge_index.copy().fa)
     for col, prop in vitems:
         try:
-            prop.fa = vertex_df[col]
+            prop.fa = vertex_df.loc[v_idx, col]
         except KeyError:
             log.info('Property {} not in vertex dataframe'.format(col))
     for col, prop in eitems:
         try:
-            prop.fa = edge_df[col]
+            print('Property map: {}'.format(prop.fa[:5]))
+            print('DataFrame: {}'.format(edge_df.iloc[e_idx[:5], col]))
+            prop.fa = edge_df.iloc[e_idx, col]
         except KeyError:
             log.info('Property {} not in edge dataframe'.format(col))
 
