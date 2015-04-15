@@ -114,6 +114,7 @@ def graph_to_dataframes(graph, stamp=None):
                             for key, prop in graph.edge_properties.items()
                             if prop.value_type() in TYPES_WHITELIST},
                            index=edge_index)
+    edge_df['edge_index'] = graph.edge_index.copy().fa
     return vertex_df, edge_df
 
 def frames_to_hdf(vertex_df, edge_df, fname, reset=False,
